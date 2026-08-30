@@ -1,0 +1,5 @@
+_cache/*
+!_cache/demo-*.json.gz
+_cache_demo_only/
+_measure_full.log
+__pycache__/

@@ -37,7 +37,12 @@ We make no claim about anyone else's; we only know what ours cost us.
 | Records in one day | **129,536** |
 | What the existing tool fetches before filtering | **1,000 (0.77%)** |
 | Markets present in that slice | **6 of 33** — one market is **64.3%** of it |
-| ### Markets it structurally never sees | ### **19 — including Seoul Garak, which alone is 25.6% of that day's records (33,124 of 129,536), 2.6x the next market** |
+| **Markets it structurally never sees** | **at least 26** — of the 32 markets present in that day's records, only the 6 above are in the slice. Among the missing: **Seoul Garak**, alone **25.6%** of the day (33,124 of 129,536), 2.6x the next market |
+
+*Counts as measured **2026-08-30**. The feed is revised retroactively: re-running the same script on
+09-01 returned **129,704** records for the same settlement date (Garak **33,207**). The ratios above
+are unchanged. We report the number we measured and the day we measured it, because a reviewer who
+re-runs it will not get our figure back.*
 
 ### It still answers. That is the problem this project is about.
 
@@ -126,7 +131,7 @@ Real output, unedited. It is in Korean because the user is — English glosses a
 
 ### The second and third are the product.
 
-And it is not a prompt asking the model to be careful. Two things make it hold:
+And it is not a prompt asking the model to be careful. Five constraints make it hold:
 
 - **The refusal screen carries no prices.** We first showed them labelled *"reference only, do not
   cite"* — and the model cited them anyway, in **4 of 6 runs**. Labels are requests. Removing the
@@ -144,8 +149,13 @@ And it is not a prompt asking the model to be careful. Two things make it hold:
   (45,301/129,536) of the day"* — and the model spun those digits into a table of per-date record
   counts it had never queried. The reasons still appear in full below; the copied line is now plain
   words. After the change, **0 of 6 runs invented a number.**
+- **The model cannot quietly change what it was asked about.** Guarding the model's *output* left its
+  *input* open: it once passed a garbled product name into the tool, and the refusal that came back
+  was correctly formatted around a word the user never typed. The agent now compares the product the
+  model passed against the question the user wrote, and refuses if they differ. The scope of the
+  guard had been narrower than the scope of the failure.
 
-`test_tools.py` holds all three in place.
+`test_tools.py` and `test_agent_guard.py` hold these in place.
 
 ---
 
@@ -167,7 +177,8 @@ ollama pull llama3.2:3b            # or set SHIPPER_MODEL / use Bedrock
 $PY agent.py                       # three demo scenes (~75 s), no API key needed
 $PY agent.py "배추 어디에 낼까"       # single question
 $PY test_evidence.py               # 26 controls (evidence gate)
-$PY test_tools.py                  # 26 controls (tool layer, incl. refusal path)
+$PY test_tools.py                  # 33 controls (tool layer, incl. refusal path)
+$PY test_agent_guard.py            # 16 controls (agent loop: leaked tool calls, product swaps)
 ```
 
 `DATA_GO_KR_API_KEY` (free, from data.go.kr) is only needed for dates outside the bundled sample.
@@ -214,8 +225,8 @@ The hackathon requires new work and asks that pre-existing code be disclosed. Sp
 rather than later, because later it cannot be split honestly.
 
 **New (built during the hackathon window)** — every file that ships: `evidence.py` · `data.py` ·
-`tools.py` · `agent.py` · `config.py` · `build_demo_cache.py` · `test_evidence.py` · `test_tools.py` · everything in
-`measurements/`.
+`tools.py` · `agent.py` · `config.py` · `build_demo_cache.py` · `test_evidence.py` · `test_tools.py` ·
+`test_agent_guard.py` · everything in `measurements/`.
 
 **Pre-existing (disclosed)** — [`korean-agriculture-mcp`](https://github.com/SongT-50/korean-agriculture-mcp),
 an MIT-licensed MCP server for the same data, published by the same author before this hackathon.
@@ -236,7 +247,7 @@ hand the model an ungated path to the same numbers our evidence gate exists to w
 | Claim | Evidence | Reproduce |
 |---|---|---|
 | Existing tool sees 0.77% of a day | `totalCount` = 129,536 vs 1,000 fetched | `measurements/_check_truncation.py` |
-| That slice is market-biased | 6 markets · 64.3% one market · Garak absent | `measurements/_check_page1_bias.py` |
+| That slice is market-biased | 6 markets of the day's 32 · 64.3% one market · Garak absent | `measurements/_check_page1_bias.py` |
 | Unit normalization flips the top market | **9 of 16** (date × product pairs) | `measurements/measure_decompose.py` |
 | Outlier handling flips it too | **6 of 16**; combined **10 of 16** | `measurements/measure_decompose.py` |
 

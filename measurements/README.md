@@ -11,7 +11,7 @@ Run from this folder: `../.venv/bin/python <script>.py` (they add the parent dir
 | Script | Question it answers | Result |
 |---|---|---|
 | `_check_truncation.py` | How much of a day does one page of the API give us? | `totalCount` **129,536** vs **1,000** fetched = **0.77%** |
-| `_check_page1_bias.py` | Is that 0.77% a fair sample? | **No.** 6 markets of 33, one market is 64.3%, **Seoul Garak absent** |
+| `_check_page1_bias.py` | Is that 0.77% a fair sample? | **No.** 6 markets, one of them 64.3%, **Seoul Garak absent**. Against the full day: **26 of the 32 markets never appear** |
 | `measure_unit_effect.py` | Does ignoring package size change who ranks first? | Fetches full days (~4 min/day, caches), then compares |
 | `measure_decompose.py` | Which fix does the work — unit normalization or outlier handling? | Unit **9/16** · outlier **6/16** · together **10/16** |
 | `measure_spread.py` | How far apart are markets on the same day? | n=16 · min **45%** · median **207%** · max **5500%** |
@@ -34,6 +34,13 @@ Run from this folder: `../.venv/bin/python <script>.py` (they add the parent dir
 | `_diag_demo_walltime.py` | How long does the 3-scene demo actually take? | **92 s to 209 s** (n=2). Attempt count is usually 1; wall-clock is not |
 | `_diag_walltime_cause.py` | Was the slow run caused by the bigger retry budget? | **No.** Same scene, budgets 2 vs 5 interleaved: mean **34 s vs 26 s**, failures **1/3 vs 0/3** |
 | `_try_tools.py` | Raw tool output for both paths, no model involved | — |
+| `_check_publish_safety.py` *(kept out of this repo — see below)* | **Before making the repo public**: what actually goes out? | Scans only `git ls-files`; keys, personal data, internal terms |
+
+**Why one script is named here but not shipped.** `_check_publish_safety.py` holds the literal list of
+terms we do not want published — company names, internal domain vocabulary. Shipping the checker
+would publish the very list it exists to keep back. It flagged itself the first time we ran it on the
+outgoing copy, which is how we learned that: a check that exempts itself reports a clean run right up
+until the thing it exempted is the thing that leaks.
 
 ### ⚠️ Attempt count and wall-clock are different axes
 

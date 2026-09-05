@@ -64,6 +64,42 @@ def _leaked(text: str) -> bool:
     return '"name"' in t and "parameters" in t and t.startswith("{")
 
 
+def _mismatched_product(q: str, messages) -> str | None:
+    """모델이 도구에 넘긴 품목이 «질문에 없는 낱말» 이면 그것을 돌려준다.
+
+    🔴 **왜 생겼나** (2026-08-31, 최종 영상 125초 화면 실측):
+       화면에 ### `2026-08-28 れ京鴝: 답할 수 없다` 가 떴다. 품목명이 오염된 채다.
+
+    ### ⇒ 우리 방어의 «범위» 가 결함의 «범위» 보다 좁았다.
+       · 막고 있던 것 = 모델이 **답변 문장**을 쓰는 것 (`_tool_headline`)
+       · 안 막던 것   = ### 모델이 **도구 인자**를 오염시키는 것
+       그 오염이 «코드가 만든 문장» 에 실려 나온다.
+       ### ★ 그래서 더 나쁘다 — 형식이 완벽해서 권위 있어 보인다.
+         (`available_dates` 건과 같은 형태다. 위 주석 참조.)
+
+    ### ⚠️ 이건 우리가 슬라이드에서 «자랑하는» 바로 그 실패다 —
+       *"In 4 of 6 runs it mixed in other languages."* 그 영상의 시연 화면에 섞여 있었다.
+
+    판정 = **질문 문자열에 그 낱말이 있나.** 사람이 쓴 질문이 기준이다.
+    ⚠️ 짧은 품목명이 우연히 포함될 수 있다(미탐 쪽). **안전 방향이라 그대로 둔다** —
+       놓치면 종전과 같고, 과하게 잡으면 멀쩡한 회차를 버린다.
+    ⚠️ `input` 이 없거나 `product` 가 없으면 **판정하지 않는다**(None). 지어내지 않는다.
+
+    ### strands 없이 시험할 수 있게 `messages`(dict 리스트)만 받는다.
+    """
+    for m in messages or []:
+        for c in (m.get("content") or []):
+            if not isinstance(c, dict):
+                continue
+            tu = c.get("toolUse")
+            if not isinstance(tu, dict) or tu.get("name") != "shipping_market_advice":
+                continue
+            prod = (tu.get("input") or {}).get("product")
+            if isinstance(prod, str) and prod.strip() and prod.strip() not in q:
+                return prod.strip()
+    return None
+
+
 def _tool_headline(agent: Agent) -> str | None:
     """도구가 돌려준 `[한 줄]` 을 그대로 꺼낸다.
 
@@ -125,6 +161,7 @@ def ask(q: str, retries: int = 5) -> None:
     t0 = time.time()
     out = ""
     headline = None
+    bad_item = None      # ### 예외로 루프를 빠져도 아래에서 참조된다. 미리 둔다
     for attempt in range(retries + 1):
         agent = build_agent()
         try:
@@ -133,16 +170,30 @@ def ask(q: str, retries: int = 5) -> None:
             out = f"<ERR {type(e).__name__}: {e}>"
             break
         headline = _tool_headline(agent)
-        if headline and not _leaked(out):
+        bad_item = _mismatched_product(q, agent.messages)
+        if headline and not _leaked(out) and not bad_item:
             break
-        # ### 재시도 사유가 둘이다. 둘 다 «근거 없는 답» 으로 끝난다.
+        # ### 재시도 사유가 «셋» 이다. 셋 다 «근거 없는 답» 으로 끝난다.
         #   ⓐ 도구 호출이 텍스트로 샜다
         #   ⓑ ### 모델이 «다른 도구» 를 불렀다 — 실측에서 `available_dates` 를 부르고
         #      날짜 목록을 「어느 시장이 유리한가」의 답인 양 내놓은 회차가 있었다.
-        why = "도구 호출이 텍스트로 샜다" if _leaked(out) else "이 질문에 맞는 도구를 안 불렀다"
+        #   ⓒ 🔴 **모델이 품목 이름을 바꿔 넘겼다** (2026-08-31 추가) —
+        #      최종 영상 화면에 `れ京鴝` 가 떴다. 위 `_mismatched_product` 주석 참조.
+        if _leaked(out):
+            why = "도구 호출이 텍스트로 샜다"
+        elif bad_item:
+            why = f"모델이 품목을 '{bad_item}' 로 바꿔 넘겼다"
+        else:
+            why = "이 질문에 맞는 도구를 안 불렀다"
         if attempt < retries:
             print(f"  [{why} — 새 세션으로 재시도 {attempt + 1}/{retries}]")
     dt = time.time() - t0
+
+    # 🔴 **재시도를 다 써도 품목이 오염돼 있으면 그 답은 «안 내놓는다»** (2026-08-31).
+    #   ### 이 줄이 없으면 가드가 «재시도만 늘리고» 마지막 오염분은 그대로 화면에 낸다.
+    #   그게 정확히 지금까지 일어나던 일이다 — 형식이 멀쩡해서 아무도 못 봤다.
+    if bad_item:
+        headline = None
 
     if headline:
         # ### 답은 이 줄이다. 코드가 만들었고 모델을 안 거쳤다.
@@ -152,6 +203,10 @@ def ask(q: str, retries: int = 5) -> None:
         #    보고 싶으면 SHOW_MODEL_TEXT=1.
         if os.getenv("SHOW_MODEL_TEXT") and out and not _leaked(out):
             print(f"\n  (모델이 다시 쓴 것 — 참고용, 권위는 위 줄에 있다: {out.strip()[:160]})")
+    elif bad_item:
+        # ### 거절 «이유» 를 말한다. 그 구별이 이 제품이다.
+        print(f"\n🔴 모델이 품목을 '{bad_item}' 로 바꿔 넘겼다. "
+              "답을 내지 않는다 — 묻지 않은 것에 답하는 것보다 낫다.")
     elif _leaked(out):
         print("\n🔴 도구 호출이 계속 샌다. 답을 내지 않는다 — 지어내는 것보다 낫다.")
     else:

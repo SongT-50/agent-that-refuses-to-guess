@@ -174,7 +174,7 @@ PY=.venv/Scripts/python.exe
 
 ollama pull llama3.2:3b            # or set SHIPPER_MODEL / use Bedrock
 
-$PY agent.py                       # three demo scenes (~75 s), no API key needed
+$PY agent.py                       # three demo scenes (92-209 s measured, n=2), no API key needed
 $PY agent.py "배추 어디에 낼까"       # single question
 $PY test_evidence.py               # 26 controls (evidence gate)
 $PY test_tools.py                  # 33 controls (tool layer, incl. refusal path)

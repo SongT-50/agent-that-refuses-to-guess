@@ -97,8 +97,12 @@ above. Wiring it in would give the model a way around our evidence gate. It appe
 **the tool we audited** — and separately, `../probe_02_mcp_bridge.py` shows Strands consuming it
 unchanged, which is how we learned the SDK.
 
-**AWS**: Strands Agents SDK drives the loop. Model provider is pluggable — local Ollama for
-zero-cost development, Amazon Bedrock in deployment.
+**AWS**: Strands Agents SDK drives the loop. The model provider is selected by one environment
+variable: `SHIPPER_PROVIDER=ollama` (default, local, zero cost, what every number in this README
+was measured on) or `SHIPPER_PROVIDER=bedrock` (`strands.models.BedrockModel`, default model
+`us.amazon.nova-lite-v1:0`, needs AWS credentials and is billed per call). **We have not yet run
+the Bedrock path ourselves**; if that changes before the deadline, the measurement will be in
+`measurements/` with the model id, and if it does not, this sentence stays as it is.
 ⚠️ **Strands defaults to Bedrock if you do not name a model.** We always name one explicitly.
 
 ---

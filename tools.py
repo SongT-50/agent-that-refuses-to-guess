@@ -39,6 +39,15 @@ def _remember(**kw) -> None:
     LAST.update(kw)
 
 
+def _hl(text: str) -> str | None:
+    """도구 텍스트의 [한 줄] 만 꺼낸다. ### headline 과 Evidence 가 «같은 호출» 에서 나왔음을 보증하려고
+    여기서 함께 기억한다(CO M3 — 메시지에서 따로 고른 문자열과 전역 LAST 를 합치지 않는다)."""
+    for line in text.splitlines():
+        if line.startswith("[한 줄]"):
+            return line[len("[한 줄]"):].strip()
+    return None
+
+
 @tool
 def shipping_market_advice(product: str, date: str = "") -> str:
     """출하할 품목을 «어느 도매시장에 내면 유리한가» 판정한다.
@@ -58,33 +67,35 @@ def shipping_market_advice(product: str, date: str = "") -> str:
     try:
         return _advice(product, date)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 «거절» 로 바꾼다
-        _remember(product=product, date=date, evidence=None, error=type(e).__name__)
-        return (
+        text = (
             f"[한 줄] {date or '해당 날짜'} {product}: 답할 수 없다 — "
             f"자료 조회 중 오류가 났다({type(e).__name__}).\n\n"
             "[근거] 판정 불가 — 도구가 실패했다. ### 추천하지 마라. "
             "값을 지어내지 말고 이 사실을 그대로 전할 것."
         )
+        _remember(product=product, date=date, evidence=None, error=type(e).__name__, headline=_hl(text))
+        return text
 
 
 def _advice(product: str, date: str = "") -> str:
     if not date:
         ds = cached_dates()
         if not ds:
-            _remember(product=product, date=date, evidence=None, error="no-dates")
-            return (
+            text = (
+                f"[한 줄] {product}: 답할 수 없다 — 전량 자료가 준비된 날짜가 없다.\n\n"
                 "[근거] 판정 불가 — 전량 자료가 준비된 날짜가 없다.\n"
                 "날짜를 지정하면 그날 자료를 조회하되, 대화 중에는 일부만 받으므로 "
                 "시장 비교는 못 하고 참고 수치만 낸다."
             )
+            _remember(product=product, date=date, evidence=None, error="no-dates", headline=_hl(text))
+            return text
         date = ds[-1]
 
     day = load_day(date)
 
     # ### 조회 자체를 «못 한» 경우. 「없다」로 말하면 안 된다.
     if day.source == "no-key":
-        _remember(product=product, date=date, evidence=None, error="no-key", source=day.source)
-        return "\n".join(
+        text = "\n".join(
             [
                 f"[한 줄] {date} {product}: 답할 수 없다 — 자료를 조회할 수 없다 "
                 "(API 키가 없고 그날 캐시도 없다).",
@@ -95,6 +106,8 @@ def _advice(product: str, date: str = "") -> str:
                 "  · 다른 날짜를 보려면 DATA_GO_KR_API_KEY 가 필요하다(data.go.kr 무료).",
             ]
         )
+        _remember(product=product, date=date, evidence=None, error="no-key", source=day.source, headline=_hl(text))
+        return text
 
     matched = filter_product(day.items, product)
     ev = build_evidence(
@@ -111,10 +124,6 @@ def _advice(product: str, date: str = "") -> str:
 
     # ### 여러 품목이 섞였으면 숨기지 않는다 — «배추» 가 브로콜리를 물고 온 적이 있다.
     mix = matched_products(matched)
-    _remember(
-        product=product, date=date, evidence=ev, error=None,
-        source=day.source, day_total=day.day_total, fetched=len(day.items), mix=mix,
-    )
     if len(mix) > 1:
         parts = ", ".join(f"{k} {v:,}건" for k, v in list(mix.items())[:5])
         more = f" 외 {len(mix) - 5}종" if len(mix) > 5 else ""
@@ -122,7 +131,13 @@ def _advice(product: str, date: str = "") -> str:
             f"⚠️ '{product}' 로 여러 품목이 잡혔다: {parts}{more}\n"
             f"   서로 다른 작물이면 이 비교는 성립하지 않는다. 품목을 좁혀 다시 물을 것.\n"
         )
-    return head + render(ev)
+    body = render(ev)
+    # ### headline 과 Evidence 를 «한 호출의 한 단위» 로 기억한다 (CO M3).
+    _remember(
+        product=product, date=date, evidence=ev, error=None, headline=_hl(body),
+        source=day.source, day_total=day.day_total, fetched=len(day.items), mix=mix,
+    )
+    return head + body
 
 
 def last_as_dict(top_n: int = 8) -> dict:

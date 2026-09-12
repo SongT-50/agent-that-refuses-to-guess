@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 import time
@@ -125,6 +126,39 @@ def _mismatched_product(q: str, messages) -> str | None:
     return None
 
 
+_DATE_RE = re.compile(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})")
+
+
+def _asked_date(q: str) -> str | None:
+    """질문에 «명시된» 날짜(YYYY-MM-DD 로 정규화). 없으면 None — 지어내지 않는다."""
+    m = _DATE_RE.search(q or "")
+    if not m:
+        return None
+    y, mo, d = m.groups()
+    return f"{y}-{int(mo):02d}-{int(d):02d}"
+
+
+def _mismatched_date(asked: str | None, got: str | None) -> str | None:
+    """사용자가 날짜를 명시했는데 도구가 «다른 날짜» 를 봤으면 그 날짜를 돌려준다 (CO M4).
+
+    실물(합성 재현): 질문 «2026-08-30 배추» 에 모델이 date=2026-08-28 을 넘겼고 그날 추천이 «정상 답» 으로 나갔다.
+    품목만 대조하던 가드의 범위가 결함의 범위보다 좁았다. 날짜 미명시면 판정하지 않는다(None).
+    """
+    if asked and got and asked != got:
+        return got
+    return None
+
+
+def _advice_calls(messages) -> int:
+    """이 시도에서 `shipping_market_advice` 가 몇 번 불렸나. ### 둘 이상이면 «어느 답인가» 가 모호하다 (CO M3)."""
+    n = 0
+    for m in messages or []:
+        for c in (m.get("content") or []):
+            if isinstance(c, dict) and (c.get("toolUse") or {}).get("name") == "shipping_market_advice":
+                n += 1
+    return n
+
+
 def _tool_headline(agent: Agent) -> str | None:
     """도구가 돌려준 `[한 줄]` 을 그대로 꺼낸다.
 
@@ -201,79 +235,98 @@ def run(q: str, retries: int = 5, log=None) -> dict:
     """
     import tools as _tools  # 지연 — LAST 를 읽으려고
 
+    # 🔴 CO 적대검증(2026-09-12, review-afh-web-plan-14883-14897) 이 합성 재현으로 잡은 넷을 여기서 막는다:
+    #   M1 거절 screen 에 모델 문장(근거 없는 가격)이 실렸다        → 모델 문장은 SHOW_MODEL_TEXT 없이는 어디에도 안 싣는다
+    #   M2 재시도 뒤 «이전 시도» 의 headline·evidence 가 남았다      → 시도마다 LAST·headline·bad_item 초기화, 채택된 시도만 반환
+    #   M3 headline(호출 A) + evidence(호출 B) 가 합쳐졌다           → 둘 다 tools.LAST 한 단위에서 꺼낸다 + 호출 2회 이상이면 거절
+    #   M4 질문 날짜 ≠ 조회 날짜인데 정상 답으로 나갔다               → _mismatched_date
+    asked_date = _asked_date(q)
     t0 = time.time()
-    out = ""
-    headline = None
-    bad_item = None      # ### 예외로 루프를 빠져도 아래에서 참조된다. 미리 둔다
-    err = None
     attempts = 0
-    _tools.LAST.clear()
+    err = None
+    # 채택된 시도의 상태 — 매 시도 «새로» 만든다. 이전 시도 것은 절대 안 남긴다.
+    out, headline, bad_item, bad_date, n_calls = "", None, None, None, 0
     for attempt in range(retries + 1):
         attempts = attempt + 1
-        agent = build_agent()
+        out, headline, bad_item, bad_date, n_calls = "", None, None, None, 0
+        _tools.LAST.clear()
         try:
+            agent = build_agent()          # 모델 생성 실패도 구조화된 error 로 (CO §3)
             out = str(agent(q))
         except Exception as e:
-            out = f"<ERR {type(e).__name__}: {e}>"
-            err = f"{type(e).__name__}: {e}"
+            err = type(e).__name__          # ### 종류만. 메시지 본문은 응답에 안 싣는다 (CO §3 오류 상세 노출)
+            logging.getLogger(__name__).warning("model call failed: %s: %s", type(e).__name__, e)
+            out = ""
             break
-        headline = _tool_headline(agent)
+        n_calls = _advice_calls(agent.messages)
+        unit = _tools.LAST                  # ### 이 시도에서 도구가 마지막으로 만든 «headline+Evidence 한 단위»
+        headline = unit.get("headline") if (n_calls >= 1 and _tool_headline(agent)) else None
         bad_item = _mismatched_product(q, agent.messages)
-        if headline and not _leaked(out) and not bad_item:
+        bad_date = _mismatched_date(asked_date, unit.get("date")) if headline else None
+        if headline and n_calls == 1 and not _leaked(out) and not bad_item and not bad_date:
             break
-        # ### 재시도 사유가 «셋» 이다. 셋 다 «근거 없는 답» 으로 끝난다.
+        # ### 재시도 사유. 전부 «근거 없는 답» 으로 끝나는 것들이다.
         #   ⓐ 도구 호출이 텍스트로 샜다
-        #   ⓑ ### 모델이 «다른 도구» 를 불렀다 — 실측에서 `available_dates` 를 부르고
-        #      날짜 목록을 「어느 시장이 유리한가」의 답인 양 내놓은 회차가 있었다.
-        #   ⓒ 🔴 **모델이 품목 이름을 바꿔 넘겼다** (2026-08-31 추가) —
-        #      최종 영상 화면에 `れ京鴝` 가 떴다. 위 `_mismatched_product` 주석 참조.
+        #   ⓑ 모델이 «다른 도구» 를 불렀다 — 실측에서 `available_dates` 를 부르고 날짜 목록을 답인 양 내놓았다
+        #   ⓒ 🔴 모델이 품목 이름을 바꿔 넘겼다 (2026-08-31) — 최종 영상 화면에 `れ京鴝` 가 떴다
+        #   ⓓ 🔴 모델이 질문과 다른 날짜를 넘겼다 (2026-09-12, CO M4)
+        #   ⓔ 🔴 판정 도구를 두 번 이상 불렀다 (2026-09-12, CO M3) — 어느 답인지 모호하다
         if _leaked(out):
             why = "도구 호출이 텍스트로 샜다"
         elif bad_item:
             why = f"모델이 품목을 '{bad_item}' 로 바꿔 넘겼다"
+        elif bad_date:
+            why = f"모델이 날짜를 {bad_date} 로 바꿔 넘겼다 (질문은 {asked_date})"
+        elif n_calls > 1:
+            why = f"판정 도구를 {n_calls}번 불렀다"
         else:
             why = "이 질문에 맞는 도구를 안 불렀다"
         if attempt < retries and log:
             log(f"{why} — 새 세션으로 재시도 {attempt + 1}/{retries}")
     dt = time.time() - t0
 
-    # 🔴 **재시도를 다 써도 품목이 오염돼 있으면 그 답은 «안 내놓는다»** (2026-08-31).
-    #   ### 이 줄이 없으면 가드가 «재시도만 늘리고» 마지막 오염분은 그대로 화면에 낸다.
-    #   그게 정확히 지금까지 일어나던 일이다 — 형식이 멀쩡해서 아무도 못 봤다.
-    if bad_item:
+    # 🔴 재시도를 다 써도 오염돼 있으면 그 답은 «안 내놓는다» (2026-08-31). 가드가 재시도만 늘리면 소용없다.
+    if bad_item or bad_date or n_calls > 1:
         headline = None
 
     screen: list[str] = []
     model_text = out.strip() if (out and not _leaked(out) and not err) else ""
+    show_model = bool(os.getenv("SHOW_MODEL_TEXT")) and bool(model_text)
     if err:
         kind = "error"
-        screen.append(f"\n🔴 모델 호출이 실패했다({err.split(':')[0]}). 답을 내지 않는다.")
+        screen.append(f"\n🔴 모델 호출이 실패했다({err}). 답을 내지 않는다.")
     elif headline:
         kind = "answer"
         # ### 답은 이 줄이다. 코드가 만들었고 모델을 안 거쳤다.
         screen.append(f"\n{headline}")
-        # ⚠️ 모델이 다시 쓴 문장은 «기본으로 안 보여준다» — 같은 실행에서 그 문장이
-        #    「물량 1,648」을 «1,648건» 이라 갈아 붙였다. 옆에 두면 화면에서 둘이 싸운다.
-        #    보고 싶으면 SHOW_MODEL_TEXT=1.
-        if os.getenv("SHOW_MODEL_TEXT") and model_text:
+        # ⚠️ 모델이 다시 쓴 문장은 «기본으로 안 보여준다» — 같은 실행에서 그 문장이 「물량 1,648」을
+        #    «1,648건» 이라 갈아 붙였다. 보고 싶으면 SHOW_MODEL_TEXT=1.
+        if show_model:
             screen.append(f"\n  (모델이 다시 쓴 것 — 참고용, 권위는 위 줄에 있다: {model_text[:160]})")
     elif bad_item:
         kind = "refused_bad_item"
-        # ### 거절 «이유» 를 말한다. 그 구별이 이 제품이다.
         screen.append(f"\n🔴 모델이 품목을 '{bad_item}' 로 바꿔 넘겼다. "
                       "답을 내지 않는다 — 묻지 않은 것에 답하는 것보다 낫다.")
+    elif bad_date:
+        kind = "refused_bad_date"
+        screen.append(f"\n🔴 질문은 {asked_date} 인데 모델이 {bad_date} 자료를 조회했다. "
+                      "답을 내지 않는다 — 다른 날의 값을 오늘 것처럼 내놓는 것보다 낫다.")
+    elif n_calls > 1:
+        kind = "refused_multi"
+        screen.append(f"\n🔴 판정 도구가 {n_calls}번 불렸다. 어느 것이 답인지 모호해 답을 내지 않는다. "
+                      "품목 하나·날짜 하나로 다시 물을 것.")
     elif _leaked(out):
         kind = "refused_leak"
         screen.append("\n🔴 도구 호출이 계속 샌다. 답을 내지 않는다 — 지어내는 것보다 낫다.")
     else:
         kind = "refused_no_tool"
         # ### 도구를 «안 불렀거나 다른 도구를 불렀다» = 이 질문의 근거가 없다.
+        #   🔴 여기에 모델 문장을 붙이지 않는다 (CO M1: 그 문장에 근거 없는 가격이 실려 화면 제목이 됐다).
         screen.append("\n🔴 이 질문에 답할 도구가 실행되지 않았다. 근거가 없어 답을 내지 않는다.")
-        if model_text:
+        if show_model:
             screen.append(f"  (모델이 쓴 것 — 근거 없음: {model_text[:120]})")
 
-    # ### 거절 종류 둘을 갈라 둔다 — «도구가 거절했다»(근거 부족) 와 «가드가 거절했다»(모델 오염) 는 다른 사실이다.
-    #   앞엣것은 headline 이 있고 그 줄이 «답할 수 없다» 로 시작한다. 뒤엣것은 headline 이 없다.
+    # «도구가 거절했다»(근거 부족 · headline 있음 · «답할 수 없다») 와 «가드가 거절했다»(headline 없음) 는 다른 사실이다.
     tool_refused = bool(headline) and "답할 수 없다" in headline
     return {
         "question": q,
@@ -281,14 +334,18 @@ def run(q: str, retries: int = 5, log=None) -> dict:
         "tool_refused": tool_refused,
         "headline": headline,
         "bad_item": bad_item,
+        "bad_date": bad_date,
+        "asked_date": asked_date,
+        "n_tool_calls": n_calls,
         "screen": screen,
-        "evidence": _tools.last_as_dict(),
+        # ### 근거는 «채택된 답» 에만 딸려 나간다 (CO M2). 오류·가드 거절엔 가격 있는 표를 안 보낸다.
+        "evidence": _tools.last_as_dict() if kind == "answer" else {},
         "attempts": attempts,
         "retries": retries,
         "seconds": round(dt, 1),
         "model": model_label(),
         # ### 모델 문장은 CLI 와 같은 계약 — SHOW_MODEL_TEXT 가 없으면 웹에도 안 보낸다(TT30).
-        "model_text": model_text[:400] if os.getenv("SHOW_MODEL_TEXT") else "",
+        "model_text": model_text[:400] if show_model else "",
         "error": err,
     }
 

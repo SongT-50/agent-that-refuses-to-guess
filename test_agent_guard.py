@@ -86,8 +86,9 @@ def main() -> int:
     #   그게 정확히 지금까지 일어나던 일이다.
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "agent.py"), encoding="utf-8").read()
+    # 2026-09-12: 가드가 넓어졌다(품목 + 날짜 + 다중 호출, CO M3·M4). 계약은 «bad_item 이면 headline 을 버린다» 그대로.
     check("AG15 소진 시 headline 을 버린다",
-          "if bad_item:\n        headline = None" in src,
+          "if bad_item or bad_date or n_calls > 1:\n        headline = None" in src,
           "이 줄이 없으면 오염분이 화면에 나간다")
     check("AG16 거절 이유를 화면에 말한다",
           "로 바꿔 넘겼다. " in src)

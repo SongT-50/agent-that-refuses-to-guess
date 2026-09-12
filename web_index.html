@@ -103,9 +103,11 @@ fetch('/api/dates').then(r=>r.json()).then(d=>{
 let timer=null;
 function tick(t0){ const s=((Date.now()-t0)/1000).toFixed(0); $('#status').textContent = `모델이 도구를 고르는 중… ${s}초 (로컬 3B 모델은 20~60초, 새서 다시 시도하면 더 걸린다)`; }
 
+let busy=false;
 async function ask(){
-  const q = $('#q').value.trim(); if(!q) return;
-  $('#go').disabled = true; $('#out').innerHTML=''; const t0=Date.now(); tick(t0); timer=setInterval(()=>tick(t0),1000);
+  const q = $('#q').value.trim(); if(!q || busy) return;   // 요청 중엔 칩·버튼 둘 다 막는다 (CO: 연속 클릭이 서버 lock 뒤에 쌓여 화면이 섞인다)
+  busy=true; $('#go').disabled = true; document.querySelectorAll('#chips .chip').forEach(b=>b.disabled=true);
+  $('#out').innerHTML=''; const t0=Date.now(); tick(t0); timer=setInterval(()=>tick(t0),1000);
   try{
     const r = await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({q})});
     const d = await r.json();
@@ -113,7 +115,7 @@ async function ask(){
     $('#status').textContent = '';
     render(d);
   }catch(e){ $('#status').textContent = '서버에 닿지 못했다: '+e; }
-  finally{ clearInterval(timer); $('#go').disabled=false; }
+  finally{ clearInterval(timer); busy=false; $('#go').disabled=false; document.querySelectorAll('#chips .chip').forEach(b=>b.disabled=false); }
 }
 $('#f').addEventListener('submit', e=>{ e.preventDefault(); ask(); });
 
@@ -126,7 +128,8 @@ function render(d){
   else { badge='답하지 않음 · Refused: guard'; klass='b-no'; }
 
   let h = `<div class="card"><span class="badge ${klass}">${badge}</span>`;
-  h += `<p class="headline">${esc(d.headline || d.screen.join(' ').trim())}</p>`;
+  // 제목 = 도구가 쓴 [한 줄]. 없으면 가드 문장 «첫 줄만» — 모델 문장은 서버가 애초에 안 보낸다 (CO M1).
+  h += `<p class="headline">${esc(d.headline || (d.screen[0]||'').trim())}</p>`;
   const cov = ev.coverage;
   const covTxt = cov ? (cov.day_total ? `그날 ${fmt(cov.day_total)}건 중 ${fmt(cov.fetched)}건 확보 · 시장 ${cov.markets_seen}/${cov.markets_nationwide}` : `시장 ${cov.markets_seen}/${cov.markets_nationwide}`) : '';
   h += `<div class="meta">model ${esc(d.model)} · 시도 ${d.attempts}/${d.retries+1} · ${d.seconds}s${ev.source? ' · 자료 '+esc(ev.source):''}${covTxt? ' · '+esc(covTxt):''}</div>`;
@@ -160,7 +163,7 @@ function render(d){
   }
 
   if (d.kind!=='answer' && d.kind!=='error'){
-    const why = {refused_bad_item:`모델이 품목을 '${esc(d.bad_item)}' 로 바꿔 넘겼다. 묻지 않은 것에 답하는 것보다 낫다.`, refused_leak:'도구 호출이 텍스트로 새서 실제 도구가 돌지 않았다. 지어내는 것보다 낫다.', refused_no_tool:'이 질문에 답할 도구가 실행되지 않았다. 근거가 없어 답을 내지 않는다.'}[d.kind] || '';
+    const why = {refused_bad_item:`모델이 품목을 '${esc(d.bad_item)}' 로 바꿔 넘겼다. 묻지 않은 것에 답하는 것보다 낫다.`, refused_bad_date:`질문은 ${esc(d.asked_date)} 인데 모델이 ${esc(d.bad_date)} 자료를 조회했다. 다른 날의 값을 오늘 것처럼 내놓는 것보다 낫다.`, refused_multi:`판정 도구가 ${d.n_tool_calls}번 불려 어느 것이 답인지 모호하다. 품목 하나·날짜 하나로 다시 물을 것.`, refused_leak:'도구 호출이 텍스트로 새서 실제 도구가 돌지 않았다. 지어내는 것보다 낫다.', refused_no_tool:'이 질문에 답할 도구가 실행되지 않았다. 근거가 없어 답을 내지 않는다.'}[d.kind] || '';
     h += `<h3>왜 답하지 않나 · Why it refused</h3><p>${why}</p><p class="hint">${d.retries}회 새 세션으로 다시 시도한 뒤에도 그랬다. 이 거절은 도구가 아니라 <b>가드</b>가 낸 것이다 — 모델 출력이 근거와 어긋났다.</p>`;
   }
   if (d.error) h += `<p class="hint">${esc(d.error)}</p>`;

@@ -56,7 +56,10 @@ async def api_ask(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:  # noqa: BLE001
         return JSONResponse({"error": "JSON body 가 필요하다: {\"q\": \"...\"}"}, status_code=400)
-    q = str(body.get("q", "")).strip()
+    # ### 객체 + 문자열 q 만 받는다. 배열·문자열·숫자는 400 (CO §3 — 500 으로 새던 것).
+    if not isinstance(body, dict) or not isinstance(body.get("q"), str):
+        return JSONResponse({"error": "JSON body 는 {\"q\": \"<문자열>\"} 형태여야 한다"}, status_code=400)
+    q = body["q"].strip()
     if not q:
         return JSONResponse({"error": "질문이 비어 있다"}, status_code=400)
     if len(q) > 300:

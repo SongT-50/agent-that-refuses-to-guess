@@ -36,6 +36,31 @@ from tools import ALL_TOOLS, SYSTEM_PROMPT  # noqa: E402
 MODEL_ID = os.getenv("SHIPPER_MODEL", "llama3.2:3b")
 OLLAMA = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
+# ### 모델 «공급자» 를 환경변수로 고른다 (2026-09-12).
+#   ollama  = 로컬. 키·비용 0. 기본값 — 심사자가 그냥 돌려도 돈다.
+#   bedrock = Amazon Bedrock. AWS 자격증명이 있어야 하고 호출마다 과금된다.
+#   ⚠️ 기본값을 bedrock 으로 두지 않는다 — 모르는 사이에 유료 호출이 나가면 안 된다.
+PROVIDER = os.getenv("SHIPPER_PROVIDER", "ollama").lower()
+BEDROCK_MODEL_ID = os.getenv("SHIPPER_BEDROCK_MODEL", "us.amazon.nova-lite-v1:0")
+BEDROCK_REGION = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+
+
+def model_label() -> str:
+    """화면·측정 기록에 남길 «어느 모델로 답했나». 이 값이 없으면 두 측정을 못 견준다."""
+    if PROVIDER == "bedrock":
+        return f"bedrock:{BEDROCK_MODEL_ID}@{BEDROCK_REGION}"
+    return f"ollama:{MODEL_ID}"
+
+
+def build_model():
+    if PROVIDER == "bedrock":
+        from strands.models import BedrockModel  # 지연 import — ollama 만 쓰는 기계에 boto3 요구 X
+
+        return BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION)
+    if PROVIDER != "ollama":
+        raise ValueError(f"SHIPPER_PROVIDER 는 ollama 또는 bedrock 이어야 한다: {PROVIDER!r}")
+    return OllamaModel(host=OLLAMA, model_id=MODEL_ID)
+
 
 def build_agent() -> Agent:
     """### 모델을 «명시» 한다. 안 하면 Strands 기본값이 유료 Bedrock 이다.
@@ -47,7 +72,7 @@ def build_agent() -> Agent:
     ⇒ 스트리밍 출력을 잃는 대신 도구가 실제로 돈다. 데모에는 후자가 필요하다.
     """
     return Agent(
-        model=OllamaModel(host=OLLAMA, model_id=MODEL_ID),
+        model=build_model(),
         tools=ALL_TOOLS,
         system_prompt=SYSTEM_PROMPT,
         callback_handler=None,
@@ -158,16 +183,39 @@ def ask(q: str, retries: int = 5) -> None:
     print("\n" + "─" * 68)
     print(f"질문: {q}")
     print("─" * 68)
+    r = run(q, retries=retries, log=lambda s: print(f"  [{s}]"))
+    for line in r["screen"]:
+        print(line)
+    print(f"\n[{r['seconds']:.1f}초]")
+
+
+def run(q: str, retries: int = 5, log=None) -> dict:
+    """`ask()` 의 본체. ### 화면 대신 «구조» 를 돌려준다 — CLI 와 웹 UI 가 같은 경로를 탄다.
+
+    돌려주는 것:
+      kind      answer | refused_bad_item | refused_leak | refused_no_tool | error
+      headline  도구가 쓴 [한 줄] (answer 일 때만. 코드가 만들었고 모델을 안 거쳤다)
+      screen    CLI 가 그대로 찍는 줄들 (옛 ask() 출력과 같다)
+      evidence  tools.last_as_dict() — 같은 호출이 만든 구조화 근거 (없으면 {})
+      attempts  실제로 돈 회차 수 · seconds · model · tool_text(도구 원문) · model_text
+    """
+    import tools as _tools  # 지연 — LAST 를 읽으려고
+
     t0 = time.time()
     out = ""
     headline = None
     bad_item = None      # ### 예외로 루프를 빠져도 아래에서 참조된다. 미리 둔다
+    err = None
+    attempts = 0
+    _tools.LAST.clear()
     for attempt in range(retries + 1):
+        attempts = attempt + 1
         agent = build_agent()
         try:
             out = str(agent(q))
         except Exception as e:
             out = f"<ERR {type(e).__name__}: {e}>"
+            err = f"{type(e).__name__}: {e}"
             break
         headline = _tool_headline(agent)
         bad_item = _mismatched_product(q, agent.messages)
@@ -185,8 +233,8 @@ def ask(q: str, retries: int = 5) -> None:
             why = f"모델이 품목을 '{bad_item}' 로 바꿔 넘겼다"
         else:
             why = "이 질문에 맞는 도구를 안 불렀다"
-        if attempt < retries:
-            print(f"  [{why} — 새 세션으로 재시도 {attempt + 1}/{retries}]")
+        if attempt < retries and log:
+            log(f"{why} — 새 세션으로 재시도 {attempt + 1}/{retries}")
     dt = time.time() - t0
 
     # 🔴 **재시도를 다 써도 품목이 오염돼 있으면 그 답은 «안 내놓는다»** (2026-08-31).
@@ -195,26 +243,54 @@ def ask(q: str, retries: int = 5) -> None:
     if bad_item:
         headline = None
 
-    if headline:
+    screen: list[str] = []
+    model_text = out.strip() if (out and not _leaked(out) and not err) else ""
+    if err:
+        kind = "error"
+        screen.append(f"\n🔴 모델 호출이 실패했다({err.split(':')[0]}). 답을 내지 않는다.")
+    elif headline:
+        kind = "answer"
         # ### 답은 이 줄이다. 코드가 만들었고 모델을 안 거쳤다.
-        print(f"\n{headline}")
+        screen.append(f"\n{headline}")
         # ⚠️ 모델이 다시 쓴 문장은 «기본으로 안 보여준다» — 같은 실행에서 그 문장이
         #    「물량 1,648」을 «1,648건» 이라 갈아 붙였다. 옆에 두면 화면에서 둘이 싸운다.
         #    보고 싶으면 SHOW_MODEL_TEXT=1.
-        if os.getenv("SHOW_MODEL_TEXT") and out and not _leaked(out):
-            print(f"\n  (모델이 다시 쓴 것 — 참고용, 권위는 위 줄에 있다: {out.strip()[:160]})")
+        if os.getenv("SHOW_MODEL_TEXT") and model_text:
+            screen.append(f"\n  (모델이 다시 쓴 것 — 참고용, 권위는 위 줄에 있다: {model_text[:160]})")
     elif bad_item:
+        kind = "refused_bad_item"
         # ### 거절 «이유» 를 말한다. 그 구별이 이 제품이다.
-        print(f"\n🔴 모델이 품목을 '{bad_item}' 로 바꿔 넘겼다. "
-              "답을 내지 않는다 — 묻지 않은 것에 답하는 것보다 낫다.")
+        screen.append(f"\n🔴 모델이 품목을 '{bad_item}' 로 바꿔 넘겼다. "
+                      "답을 내지 않는다 — 묻지 않은 것에 답하는 것보다 낫다.")
     elif _leaked(out):
-        print("\n🔴 도구 호출이 계속 샌다. 답을 내지 않는다 — 지어내는 것보다 낫다.")
+        kind = "refused_leak"
+        screen.append("\n🔴 도구 호출이 계속 샌다. 답을 내지 않는다 — 지어내는 것보다 낫다.")
     else:
+        kind = "refused_no_tool"
         # ### 도구를 «안 불렀거나 다른 도구를 불렀다» = 이 질문의 근거가 없다.
-        print("\n🔴 이 질문에 답할 도구가 실행되지 않았다. 근거가 없어 답을 내지 않는다.")
-        if out and not _leaked(out):
-            print(f"  (모델이 쓴 것 — 근거 없음: {out.strip()[:120]})")
-    print(f"\n[{dt:.1f}초]")
+        screen.append("\n🔴 이 질문에 답할 도구가 실행되지 않았다. 근거가 없어 답을 내지 않는다.")
+        if model_text:
+            screen.append(f"  (모델이 쓴 것 — 근거 없음: {model_text[:120]})")
+
+    # ### 거절 종류 둘을 갈라 둔다 — «도구가 거절했다»(근거 부족) 와 «가드가 거절했다»(모델 오염) 는 다른 사실이다.
+    #   앞엣것은 headline 이 있고 그 줄이 «답할 수 없다» 로 시작한다. 뒤엣것은 headline 이 없다.
+    tool_refused = bool(headline) and "답할 수 없다" in headline
+    return {
+        "question": q,
+        "kind": kind,
+        "tool_refused": tool_refused,
+        "headline": headline,
+        "bad_item": bad_item,
+        "screen": screen,
+        "evidence": _tools.last_as_dict(),
+        "attempts": attempts,
+        "retries": retries,
+        "seconds": round(dt, 1),
+        "model": model_label(),
+        # ### 모델 문장은 CLI 와 같은 계약 — SHOW_MODEL_TEXT 가 없으면 웹에도 안 보낸다(TT30).
+        "model_text": model_text[:400] if os.getenv("SHOW_MODEL_TEXT") else "",
+        "error": err,
+    }
 
 
 # ### 세 장면이 «서로 다른 거절 이유» 를 보인다. 그 구별이 이 제품이다.

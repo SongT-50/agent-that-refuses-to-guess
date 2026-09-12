@@ -185,6 +185,28 @@ $PY test_tools.py                  # 33 controls (tool layer, incl. refusal path
 $PY test_agent_guard.py            # 16 controls (agent loop: leaked tool calls, product swaps)
 ```
 
+### Web UI (same agent, same tool, same verdict)
+
+```bash
+$PY web.py                         # http://127.0.0.1:8620  (uvicorn + starlette, both already pulled in by strands)
+```
+
+The page calls `agent.run()`, the exact function the CLI uses; there is no separate "UI path". The
+table is built from the `Evidence` object the tool computed on that call, so the numbers on screen
+and the sentence the model was given come from one computation. When the tool refuses, the page
+shows the reasons and the markets it saw, and **withholds the prices** for the same reason the
+text output does: a ranking from a truncated sample should not be quotable. The first line under
+the input says which dates and products the bundled sample can actually answer, so a demo cannot
+be mistaken for coverage it does not have.
+
+| answered | refused |
+|---|---|
+| ![answer screen](docs/web_ui_answer.png) | ![refusal screen](docs/web_ui_refused.png) |
+
+Both screenshots are real model runs on the bundled data (`_diag_web_ui.py` in `measurements/`
+reproduces the three demo scenes end-to-end through the HTTP API; 3 of 3 matched the expected
+verdict on the run we recorded, which is one run, not a reliability figure).
+
 `DATA_GO_KR_API_KEY` (free, from data.go.kr) is only needed for dates outside the bundled sample.
 Without it the agent says it could not look, which is not the same as saying there was nothing.
 

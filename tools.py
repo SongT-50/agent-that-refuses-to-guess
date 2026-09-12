@@ -24,7 +24,19 @@ from data import (  # noqa: E402
     load_day,
     matched_products,
 )
-from evidence import build_evidence, render  # noqa: E402
+from evidence import Evidence, build_evidence, render  # noqa: E402
+
+
+# ### 마지막 판정의 «구조화된 근거». 웹 UI 가 표를 그릴 때 쓴다 (2026-09-12).
+#   모델은 도구가 낸 텍스트만 본다. UI 는 같은 호출이 만든 Evidence 객체를 본다.
+#   ⇒ 화면의 표와 모델이 읽은 문장은 «같은 계산» 에서 나온다. 두 번 계산하지 않는다.
+#   ⚠️ 한 프로세스에 한 요청씩 돈다는 전제(web.py 가 lock 으로 보장). 동시 요청이면 섞인다.
+LAST: dict = {}
+
+
+def _remember(**kw) -> None:
+    LAST.clear()
+    LAST.update(kw)
 
 
 @tool
@@ -46,6 +58,7 @@ def shipping_market_advice(product: str, date: str = "") -> str:
     try:
         return _advice(product, date)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 «거절» 로 바꾼다
+        _remember(product=product, date=date, evidence=None, error=type(e).__name__)
         return (
             f"[한 줄] {date or '해당 날짜'} {product}: 답할 수 없다 — "
             f"자료 조회 중 오류가 났다({type(e).__name__}).\n\n"
@@ -58,6 +71,7 @@ def _advice(product: str, date: str = "") -> str:
     if not date:
         ds = cached_dates()
         if not ds:
+            _remember(product=product, date=date, evidence=None, error="no-dates")
             return (
                 "[근거] 판정 불가 — 전량 자료가 준비된 날짜가 없다.\n"
                 "날짜를 지정하면 그날 자료를 조회하되, 대화 중에는 일부만 받으므로 "
@@ -69,6 +83,7 @@ def _advice(product: str, date: str = "") -> str:
 
     # ### 조회 자체를 «못 한» 경우. 「없다」로 말하면 안 된다.
     if day.source == "no-key":
+        _remember(product=product, date=date, evidence=None, error="no-key", source=day.source)
         return "\n".join(
             [
                 f"[한 줄] {date} {product}: 답할 수 없다 — 자료를 조회할 수 없다 "
@@ -96,6 +111,10 @@ def _advice(product: str, date: str = "") -> str:
 
     # ### 여러 품목이 섞였으면 숨기지 않는다 — «배추» 가 브로콜리를 물고 온 적이 있다.
     mix = matched_products(matched)
+    _remember(
+        product=product, date=date, evidence=ev, error=None,
+        source=day.source, day_total=day.day_total, fetched=len(day.items), mix=mix,
+    )
     if len(mix) > 1:
         parts = ", ".join(f"{k} {v:,}건" for k, v in list(mix.items())[:5])
         more = f" 외 {len(mix) - 5}종" if len(mix) > 5 else ""
@@ -104,6 +123,67 @@ def _advice(product: str, date: str = "") -> str:
             f"   서로 다른 작물이면 이 비교는 성립하지 않는다. 품목을 좁혀 다시 물을 것.\n"
         )
     return head + render(ev)
+
+
+def last_as_dict(top_n: int = 8) -> dict:
+    """마지막 판정을 JSON 으로. ### 판정·근거·경고 전부 evidence.py 가 낸 것을 옮길 뿐, 여기서 다시 계산하지 않는다."""
+    if not LAST:
+        return {}
+    ev: Evidence | None = LAST.get("evidence")
+    out = {
+        "product": LAST.get("product"),
+        "date": LAST.get("date"),
+        "source": LAST.get("source"),
+        "day_total": LAST.get("day_total"),
+        "fetched": LAST.get("fetched"),
+        "error": LAST.get("error"),
+        "mix": LAST.get("mix") or {},
+    }
+    if ev is None:
+        return out
+    u = ev.usable_markets
+    out.update(
+        {
+            "sufficient": ev.sufficient,
+            "n_total": ev.n_total,
+            "n_markets": len(ev.markets),
+            "n_usable": len(u),
+            "why_insufficient": ev.why_insufficient(),
+            "caveats": ev.caveats(),
+            "coverage": (
+                {
+                    "fetched": ev.coverage.fetched,
+                    "day_total": ev.coverage.day_total,
+                    "markets_seen": ev.coverage.markets_seen,
+                    "markets_nationwide": ev.coverage.markets_nationwide,
+                    "product_complete": ev.coverage.product_complete,
+                    "truncated": ev.coverage.truncated,
+                }
+                if ev.coverage
+                else None
+            ),
+            # ### 거절이면 가격을 «안 보낸다» — render() 가 텍스트에서 뺀 것과 같은 이유.
+            #   비교가 성립하지 않는 표본의 값이 화면에 있으면 사람도 그걸 인용한다.
+            "markets": [
+                {
+                    "rank": i,
+                    "market": m.market,
+                    "won_per_kg_median": round(m.won_per_kg_avg),
+                    "won_per_kg_mean": round(m.mean_raw),
+                    "n": m.n,
+                    "typical_pack_kg": m.typical_pack,
+                    "total_qty": round(m.total_qty),
+                    "skewed": m.skewed,
+                    "mixed_pack": m.mixed_pack,
+                }
+                for i, m in enumerate(u[:top_n], 1)
+            ]
+            if ev.sufficient
+            else [],
+            "markets_seen": [{"market": m.market, "n": m.n} for m in ev.markets[:12]],
+        }
+    )
+    return out
 
 
 @tool

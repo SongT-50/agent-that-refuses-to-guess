@@ -270,7 +270,8 @@ def t_interface_never_prints_model_text_by_default():
     import agent as A
     import inspect
 
-    src = inspect.getsource(A.ask)
+    # 2026-09-12: 본체가 ask() -> run() 으로 옮겨졌다(웹 UI 와 경로 공유). 계약은 run 에 산다.
+    src = inspect.getsource(A.run)
     check("TT30 모델 문장 출력이 환경변수 뒤에 있다", "SHOW_MODEL_TEXT" in src)
     # 기본값에서 그 분기가 꺼져 있나
     saved = os.environ.pop("SHOW_MODEL_TEXT", None)

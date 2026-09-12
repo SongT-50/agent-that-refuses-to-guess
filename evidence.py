@@ -115,7 +115,7 @@ class Coverage:
         if self.product_complete:
             out.append(
                 f"하루 전체 {self.day_total:,}건 중 일부만 받았으나 "
-                "### 이 품목의 그날 기록은 전부 들어 있다 — 그래서 이 품목 비교는 성립한다"
+                "이 품목의 그날 기록은 전부 들어 있다 — 그래서 이 품목 비교는 성립한다"
                 if self.day_total
                 else "이 품목의 그날 기록은 전부 들어 있다"
             )

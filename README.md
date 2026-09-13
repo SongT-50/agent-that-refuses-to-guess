@@ -163,7 +163,10 @@ And it is not a prompt asking the model to be careful. Five constraints make it 
   date the tool looked at is not the date the question gave, and when the question names more than
   one date it refuses rather than picking the first. Dates are read in `2026-08-28`, `2026.8.28`,
   `2026/8/28` and `2026년 8월 28일` form. **A date written any other way reads as "no date given,"
-  and then this guard does not apply** — the other checks still do.
+  and then this guard does not apply** — the other checks still do. Known unrecognized forms, from
+  the same review: a year left out (`8월 30일`), no separators (`20260830`), and relative words
+  (`모레`, "the day after tomorrow"). We are listing them rather than implying the four forms above
+  are the only ones a person might type.
 
 `test_tools.py`, `test_agent_guard.py` and `test_run_contract.py` hold these in place. The last one
 was written from an adversarial review of the web path and fails 11 of its checks on the code as it

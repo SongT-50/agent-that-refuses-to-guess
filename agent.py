@@ -126,16 +126,29 @@ def _mismatched_product(q: str, messages) -> str | None:
     return None
 
 
-_DATE_RE = re.compile(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})")
+# 구분자형(2026-08-28 · 2026.8.28 · 2026/8/28) 과 한국어형(2026년 8월 28일) 둘 다.
+# 🔴 한국어형은 2026-09-13 에 추가했다 — 그전에는 `2026년 8월 30일 배추` 가 «날짜 미명시» 로 읽혀
+#    모델이 다른 날을 조회해도 통과했다(CO 적대검증 R1). 사용자가 한국어로 묻는 제품인데 가드는 영문 형식만 봤다.
+_DATE_RE = re.compile(r"(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?")
+
+
+def _asked_dates(q: str) -> list[str]:
+    """질문에 «명시된» 날짜 전부(YYYY-MM-DD 정규화, 순서 유지·중복 제거). 없으면 빈 목록."""
+    out: list[str] = []
+    for y, mo, d in _DATE_RE.findall(q or ""):
+        try:
+            iso = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        except ValueError:
+            continue
+        if iso not in out:
+            out.append(iso)
+    return out
 
 
 def _asked_date(q: str) -> str | None:
-    """질문에 «명시된» 날짜(YYYY-MM-DD 로 정규화). 없으면 None — 지어내지 않는다."""
-    m = _DATE_RE.search(q or "")
-    if not m:
-        return None
-    y, mo, d = m.groups()
-    return f"{y}-{int(mo):02d}-{int(d):02d}"
+    """질문의 날짜가 «정확히 하나» 일 때만 그 날짜. 없거나 둘 이상이면 None — 지어내지 않는다."""
+    ds = _asked_dates(q)
+    return ds[0] if len(ds) == 1 else None
 
 
 def _mismatched_date(asked: str | None, got: str | None) -> str | None:
@@ -240,7 +253,11 @@ def run(q: str, retries: int = 5, log=None) -> dict:
     #   M2 재시도 뒤 «이전 시도» 의 headline·evidence 가 남았다      → 시도마다 LAST·headline·bad_item 초기화, 채택된 시도만 반환
     #   M3 headline(호출 A) + evidence(호출 B) 가 합쳐졌다           → 둘 다 tools.LAST 한 단위에서 꺼낸다 + 호출 2회 이상이면 거절
     #   M4 질문 날짜 ≠ 조회 날짜인데 정상 답으로 나갔다               → _mismatched_date
-    asked_date = _asked_date(q)
+    asked_all = _asked_dates(q)
+    asked_date = asked_all[0] if len(asked_all) == 1 else None
+    # 🔴 질문에 날짜가 둘 이상이면 «첫 것을 채택» 하지 않는다 — 어느 날을 묻는지 우리가 모른다 (CO R1).
+    #   실물: `2026-08-28 말고 2026-08-30 배추` 에서 첫 날짜가 채택돼 08-28 가격이 정상 답으로 나갔다.
+    multi_date = len(asked_all) > 1
     t0 = time.time()
     attempts = 0
     err = None
@@ -263,6 +280,8 @@ def run(q: str, retries: int = 5, log=None) -> dict:
         headline = unit.get("headline") if (n_calls >= 1 and _tool_headline(agent)) else None
         bad_item = _mismatched_product(q, agent.messages)
         bad_date = _mismatched_date(asked_date, unit.get("date")) if headline else None
+        if headline and multi_date:
+            bad_date = unit.get("date")     # 어느 날을 물었는지 모른다 ⇒ 조회한 날을 밝히고 거절한다
         if headline and n_calls == 1 and not _leaked(out) and not bad_item and not bad_date:
             break
         # ### 재시도 사유. 전부 «근거 없는 답» 으로 끝나는 것들이다.
@@ -286,6 +305,13 @@ def run(q: str, retries: int = 5, log=None) -> dict:
     dt = time.time() - t0
 
     # 🔴 재시도를 다 써도 오염돼 있으면 그 답은 «안 내놓는다» (2026-08-31). 가드가 재시도만 늘리면 소용없다.
+    #
+    # ### 누수(`_leaked`)는 «여기» 목록에 «일부러» 없다 — 정책을 명시한다 (CO R2, 2026-09-13):
+    #   도구가 제대로 돌아 headline 이 나왔으면 그 답의 근거는 코드가 계산한 것이고, 모델이 그 뒤에
+    #   호출 JSON 을 글자로 뱉은 것은 «답의 근거» 를 바꾸지 않는다. 그 원문은 화면에 안 나간다.
+    #   ### 누수가 답을 막아야 하는 경우는 «도구가 아예 안 돈» 때이고, 그건 headline 이 없어 아래 refused_leak 로 간다.
+    #   ⚠️ 그래서 위 재시도 루프는 누수를 «다시 시도할 사유» 로는 쓰되(깨끗한 회차를 선호한다)
+    #      소진 뒤 근거 있는 답을 버리지는 않는다. 둘은 다른 판단이다.
     if bad_item or bad_date or n_calls > 1:
         headline = None
 
@@ -309,8 +335,12 @@ def run(q: str, retries: int = 5, log=None) -> dict:
                       "답을 내지 않는다 — 묻지 않은 것에 답하는 것보다 낫다.")
     elif bad_date:
         kind = "refused_bad_date"
-        screen.append(f"\n🔴 질문은 {asked_date} 인데 모델이 {bad_date} 자료를 조회했다. "
-                      "답을 내지 않는다 — 다른 날의 값을 오늘 것처럼 내놓는 것보다 낫다.")
+        if multi_date:
+            screen.append(f"\n🔴 질문에 날짜가 여럿이다({', '.join(asked_all)}). 모델은 {bad_date} 를 조회했다. "
+                          "어느 날을 묻는지 알 수 없어 답을 내지 않는다 — 날짜 하나로 다시 물을 것.")
+        else:
+            screen.append(f"\n🔴 질문은 {asked_date} 인데 모델이 {bad_date} 자료를 조회했다. "
+                          "답을 내지 않는다 — 다른 날의 값을 오늘 것처럼 내놓는 것보다 낫다.")
     elif n_calls > 1:
         kind = "refused_multi"
         screen.append(f"\n🔴 판정 도구가 {n_calls}번 불렸다. 어느 것이 답인지 모호해 답을 내지 않는다. "
@@ -336,6 +366,7 @@ def run(q: str, retries: int = 5, log=None) -> dict:
         "bad_item": bad_item,
         "bad_date": bad_date,
         "asked_date": asked_date,
+        "asked_dates": asked_all,
         "n_tool_calls": n_calls,
         "screen": screen,
         # ### 근거는 «채택된 답» 에만 딸려 나간다 (CO M2). 오류·가드 거절엔 가격 있는 표를 안 보낸다.

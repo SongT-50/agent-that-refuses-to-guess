@@ -169,6 +169,32 @@ def main() -> int:
     check("M4d 날짜 미명시면 판정하지 않는다", r["kind"] == "answer" and r["bad_date"] is None)
     check("M4e 점·슬래시 날짜도 읽는다", A._asked_date("2026.8.28 복숭아") == "2026-08-28" and A._asked_date("2026/08/30") == "2026-08-30")
 
+    # ── R1 (CO 재검증 2026-09-13): 날짜 가드 «범위» 밖에서 다른 날 가격이 나갔다 ──
+    #   CO 가 준 입력 문자열 그대로 쓴다. 둘 다 도구는 08-28 을 조회한다.
+    check("R1a 한국어 날짜를 읽는다", A._asked_date("2026년 8월 30일 배추 어디") == "2026-08-30")
+    r = run("2026년 8월 30일 배추 어디",
+            [FakeAgent([("shipping_market_advice", "배추", "2026-08-28")], "…")], retries=0)
+    check("R1b 한국어 날짜 어긋남 = refused_bad_date", r["kind"] == "refused_bad_date", r["kind"])
+    check("R1c 08-28 가격이 안 나갔다", r["headline"] is None and r["evidence"] == {})
+    check("R1d 복수 날짜는 첫 것을 채택하지 않는다", A._asked_date("2026-08-28 말고 2026-08-30 배추") is None
+          and A._asked_dates("2026-08-28 말고 2026-08-30 배추") == ["2026-08-28", "2026-08-30"])
+    r = run("2026-08-28 말고 2026-08-30 배추",
+            [FakeAgent([("shipping_market_advice", "배추", "2026-08-28")], "…")], retries=0)
+    check("R1e 복수 날짜 = refused_bad_date", r["kind"] == "refused_bad_date", r["kind"])
+    check("R1f 화면이 날짜 둘을 다 말한다", "2026-08-28" in r["screen"][0] and "2026-08-30" in r["screen"][0])
+    # 음성 대조군 — 한국어 날짜가 «맞으면» 조용하다 (이 가드가 전부 거절하는 게 아님)
+    r = run("2026년 8월 28일 복숭아 어디",
+            [FakeAgent([("shipping_market_advice", "복숭아", "2026-08-28")], "원주")], retries=0)
+    check("R1g 한국어 날짜가 맞으면 답한다", r["kind"] == "answer" and r["bad_date"] is None, r["kind"])
+
+    # ── R2 (CO 보조 지적): 도구가 돈 뒤 모델 출력이 새면? ── 정책 = 답을 버리지 않는다.
+    #   근거는 코드가 만들었고 누수 원문은 화면에 안 나간다. 도구가 «안 돈» 누수는 아래 LK2 가 거절한다.
+    r = run(Q_PEACH, [FakeAgent([("shipping_market_advice", "복숭아", "2026-08-28")], LEAK_JSON)], retries=0)
+    check("LK1 도구가 돌았으면 누수에도 답한다", r["kind"] == "answer" and r["headline"], r["kind"])
+    check("LK2 누수 원문은 응답에 없다", "shipping_market_advice\"" not in dumps(r) and r["model_text"] == "")
+    r = run(Q_PEACH, [FakeAgent([], LEAK_JSON)], retries=0)
+    check("LK3 도구가 안 돌았으면 누수는 거절", r["kind"] == "refused_leak" and r["evidence"] == {}, r["kind"])
+
     # ── 웹 경계: JSON 형태 ──────────────────────────────────────────
     try:
         from starlette.testclient import TestClient

@@ -158,8 +158,16 @@ And it is not a prompt asking the model to be careful. Five constraints make it 
   was correctly formatted around a word the user never typed. The agent now compares the product the
   model passed against the question the user wrote, and refuses if they differ. The scope of the
   guard had been narrower than the scope of the failure.
+- **The same guard, for dates.** An adversarial review of the web path found the product check had a
+  twin hole: the model could query a different day than the question named. It now refuses when the
+  date the tool looked at is not the date the question gave, and when the question names more than
+  one date it refuses rather than picking the first. Dates are read in `2026-08-28`, `2026.8.28`,
+  `2026/8/28` and `2026년 8월 28일` form. **A date written any other way reads as "no date given,"
+  and then this guard does not apply** — the other checks still do.
 
-`test_tools.py` and `test_agent_guard.py` hold these in place.
+`test_tools.py`, `test_agent_guard.py` and `test_run_contract.py` hold these in place. The last one
+was written from an adversarial review of the web path and fails 11 of its checks on the code as it
+stood before that review, which is the only reason to trust that it checks anything.
 
 ---
 
